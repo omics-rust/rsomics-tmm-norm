@@ -77,6 +77,9 @@ fn parse_count(cell: &[u8]) -> Result<f64> {
     let v: f64 = s
         .parse()
         .map_err(|_| RsomicsError::InvalidInput(format!("non-numeric count '{s}'")))?;
+    if !v.is_finite() {
+        return Err(RsomicsError::InvalidInput("NA counts not permitted".into()));
+    }
     if v < 0.0 {
         return Err(RsomicsError::InvalidInput(
             "negative counts not allowed".into(),
@@ -87,10 +90,10 @@ fn parse_count(cell: &[u8]) -> Result<f64> {
 
 /// edgeR calcNormFactors(method="TMM"). Returns one factor per sample,
 /// scaled so their geometric mean is 1.
-pub fn tmm_factors(m: &Matrix) -> Vec<f64> {
+pub fn tmm_factors(m: &Matrix) -> Result<Vec<f64>> {
     let n_samples = m.samples.len();
     if n_samples == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let kept: Vec<&Vec<f64>> = m
@@ -100,7 +103,7 @@ pub fn tmm_factors(m: &Matrix) -> Vec<f64> {
         .collect();
 
     if kept.is_empty() || n_samples == 1 {
-        return vec![1.0; n_samples];
+        return Ok(vec![1.0; n_samples]);
     }
 
     let n_genes = kept.len();
@@ -109,6 +112,15 @@ pub fn tmm_factors(m: &Matrix) -> Vec<f64> {
         for (j, &c) in row.iter().enumerate() {
             lib_size[j] += c;
         }
+    }
+
+    // An all-zero library column makes the 0.75-quantile / lib.size ratio 0/0 = NaN,
+    // which edgeR propagates into a "missing value where TRUE/FALSE needed" error.
+    if let Some(j) = lib_size.iter().position(|&s| s <= 0.0) {
+        return Err(RsomicsError::InvalidInput(format!(
+            "sample '{}' has zero total count: missing value where TRUE/FALSE needed",
+            m.samples[j]
+        )));
     }
 
     let ref_col = reference_column(&kept, &lib_size, n_genes, n_samples);
@@ -129,7 +141,7 @@ pub fn tmm_factors(m: &Matrix) -> Vec<f64> {
     for fj in &mut f {
         *fj /= scale;
     }
-    f
+    Ok(f)
 }
 
 fn reference_column(
@@ -235,7 +247,7 @@ fn calc_factor_tmm(obs: &[f64], reference: &[f64], n_o: f64, n_r: f64) -> f64 {
 fn average_rank(x: &[f64]) -> Vec<f64> {
     let n = x.len();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap());
+    order.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
 
     let mut ranks = vec![0.0f64; n];
     let mut i = 0;
@@ -260,7 +272,7 @@ fn quantile_type7(x: &mut [f64], p: f64) -> f64 {
     if n == 0 {
         return 0.0;
     }
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let h = (n - 1) as f64 * p;
     let lo = h.floor() as usize;
     let frac = h - lo as f64;
@@ -272,7 +284,7 @@ fn quantile_type7(x: &mut [f64], p: f64) -> f64 {
 }
 
 fn median_sorted(x: &mut [f64]) -> f64 {
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let n = x.len();
     if n == 0 {
         return 0.0;
@@ -296,7 +308,7 @@ pub fn write_factors(samples: &[String], factors: &[f64], output: &mut dyn Write
 
 pub fn run(counts_path: &Path, output: &mut dyn Write) -> Result<usize> {
     let m = read_matrix(counts_path)?;
-    let factors = tmm_factors(&m);
+    let factors = tmm_factors(&m)?;
     write_factors(&m.samples, &factors, output)?;
     Ok(m.samples.len())
 }
@@ -333,7 +345,7 @@ mod tests {
                 vec![200.0, 200.0, 200.0],
             ],
         };
-        for f in tmm_factors(&m) {
+        for f in tmm_factors(&m).unwrap() {
             assert!((f - 1.0).abs() < 1e-9);
         }
     }
@@ -350,8 +362,31 @@ mod tests {
                 vec![5.0, 0.0],
             ],
         };
-        let f = tmm_factors(&m);
+        let f = tmm_factors(&m).unwrap();
         let log_mean: f64 = f.iter().map(|x| x.ln()).sum::<f64>() / f.len() as f64;
         assert!(log_mean.abs() < 1e-9);
+    }
+
+    #[test]
+    fn all_zero_column_errors_cleanly() {
+        // edgeR: an all-zero library column -> "missing value where TRUE/FALSE needed".
+        let m = Matrix {
+            samples: vec!["S0".into(), "S1".into(), "S2".into()],
+            counts: vec![
+                vec![10.0, 0.0, 5.0],
+                vec![20.0, 0.0, 8.0],
+                vec![5.0, 0.0, 3.0],
+            ],
+        };
+        let err = tmm_factors(&m).unwrap_err();
+        assert!(matches!(err, RsomicsError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn non_finite_count_literal_rejected() {
+        // edgeR: an NA/non-finite count -> "NA counts not permitted".
+        assert!(parse_count(b"NaN").is_err());
+        assert!(parse_count(b"inf").is_err());
+        assert!(parse_count(b"-inf").is_err());
     }
 }

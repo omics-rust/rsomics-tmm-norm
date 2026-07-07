@@ -60,6 +60,42 @@ fn matches_committed_golden() {
     assert_close(&run_ours(), &parse(&golden_out));
 }
 
+fn run_expecting_error(fixture: &str) -> String {
+    let out = Command::new(ours()).arg(golden(fixture)).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "expected {fixture} to fail, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !stderr.contains("panicked"),
+        "{fixture} panicked instead of failing loudly: {stderr}"
+    );
+    stderr
+}
+
+// edgeR errors ("missing value where TRUE/FALSE needed") on an all-zero library
+// column. We must reject it loudly, not panic on a 0/0 NaN in the quantile sort.
+#[test]
+fn all_zero_column_errors_not_panic() {
+    let stderr = run_expecting_error("allzero_column.tsv");
+    assert!(
+        stderr.contains("zero total count") || stderr.contains("missing value"),
+        "unexpected error text: {stderr}"
+    );
+}
+
+// edgeR errors ("NA counts not permitted") on a non-finite count literal. We must
+// reject it at parse, not accept it and panic on a NaN in a downstream sort.
+#[test]
+fn non_finite_literal_errors_not_panic() {
+    let stderr = run_expecting_error("nan_literal.tsv");
+    assert!(
+        stderr.contains("NA counts not permitted"),
+        "unexpected error text: {stderr}"
+    );
+}
+
 // Live differential vs edgeR via `conda run -n r-bioc Rscript`. Loud-skips when
 // the r-bioc env is unavailable (e.g. CI runners with no Bioconductor).
 #[test]
