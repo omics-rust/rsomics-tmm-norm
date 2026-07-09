@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-tmm-norm"
-version = "0.1.1"
+version = "0.1.2"
 description = "TMM (trimmed mean of M-values) per-sample normalization factors for a count matrix — Rust port of edgeR calcNormFactors(method=\"TMM\")"
 edition = "2024"
 rust-version = "1.91"
